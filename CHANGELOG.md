@@ -1,5 +1,25 @@
 # Matrix-Rust-SDK Node.js Bindings
 
+## v0.4.0-beta.1 - 2025-08-11
+
+-   Update matrix-rust-sdk dependency to 0.9.0.
+-   Support Node.JS 24, drop support for 18, 20.
+-   Support Rust 1.77.
+-   Minimum supported glibc version is now `2.35` (Ubuntu 22.04+ compatible). Support has been dropped for prior versions.
+-   `RoomId` no longer has a `serverName` property, and is allowed to not have a server name component.
+    This is a breaking change.
+
+## 0.3.0-beta.1 - 2024-11-18
+
+-   Update matrix-rust-sdk dependency.
+-   The SignedCurve25519 algorithm is no longer supported.
+
+## 0.2.0-beta.1 - 2024-06-11
+
+-   Support Node.JS 22, drop support for 16, 19.
+-   Update matrix-rust-sdk dependency.
+-   `RoomId` no longer has a `localpart` property.
+
 ## 0.1.0-beta.12 - 2024-02-01
 
 -   Add prebuilt library support for 390x. [#32](https://github.com/matrix-org/matrix-rust-sdk-crypto-nodejs/pull/32)

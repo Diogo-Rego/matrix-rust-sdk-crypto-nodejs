@@ -7,11 +7,14 @@ use std::{
     sync::Arc,
 };
 
-use matrix_sdk_common::ruma::{serde::Raw, DeviceKeyAlgorithm, OwnedTransactionId, UInt};
-use matrix_sdk_crypto::{backups::MegolmV1BackupKey, types::RoomKeyBackupInfo};
-use napi::bindgen_prelude::{within_runtime_if_available, Either7, FromNapiValue, ToNapiValue};
+use matrix_sdk_common::ruma::{serde::Raw, OneTimeKeyAlgorithm, OwnedTransactionId, UInt};
+use matrix_sdk_crypto::{
+    backups::MegolmV1BackupKey, types::RoomKeyBackupInfo, DecryptionSettings,
+    EncryptionSyncChanges, TrustRequirement,
+};
+use napi::bindgen_prelude::{within_runtime_if_available, Either6};
 use napi_derive::*;
-use serde_json::{value::RawValue, Value as JsonValue};
+use serde_json::value::RawValue;
 use zeroize::Zeroize;
 
 use crate::{
@@ -136,6 +139,7 @@ impl OlmMachine {
                                 .await
                                 .map(Arc::new)
                                 .map_err(into_err)?,
+                                None,
                             )
                             .await
                         }
@@ -202,28 +206,32 @@ impl OlmMachine {
         one_time_key_counts: HashMap<String, u32>,
         unused_fallback_keys: Vec<String>,
     ) -> napi::Result<String> {
-        let to_device_events = serde_json::from_str(to_device_events.as_ref()).map_err(into_err)?;
+        let to_device_events_decoded =
+            serde_json::from_str(to_device_events.as_ref()).map_err(into_err)?;
         let changed_devices = changed_devices.inner.clone();
         let one_time_key_counts = one_time_key_counts
             .iter()
-            .map(|(key, value)| (DeviceKeyAlgorithm::from(key.as_str()), UInt::from(*value)))
+            .map(|(key, value)| (OneTimeKeyAlgorithm::from(key.as_str()), UInt::from(*value)))
             .collect::<BTreeMap<_, _>>();
         let unused_fallback_keys = Some(
             unused_fallback_keys
                 .into_iter()
-                .map(|key| DeviceKeyAlgorithm::from(key.as_str()))
+                .map(|key| OneTimeKeyAlgorithm::from(key.as_str()))
                 .collect::<Vec<_>>(),
         );
 
         serde_json::to_string(
             &self
                 .inner
-                .receive_sync_changes(
-                    to_device_events,
-                    &changed_devices,
-                    &one_time_key_counts,
-                    unused_fallback_keys.as_deref(),
-                )
+                .receive_sync_changes(EncryptionSyncChanges {
+                    to_device_events: to_device_events_decoded,
+                    changed_devices: &changed_devices,
+                    one_time_keys_counts: &one_time_key_counts,
+                    unused_fallback_keys: unused_fallback_keys.as_deref(),
+
+                    // matrix-sdk-crypto does not (currently) use `next_batch_token`.
+                    next_batch_token: None,
+                })
                 .await
                 .map_err(into_err)?,
         )
@@ -235,7 +243,7 @@ impl OlmMachine {
     /// This returns a list of `KeysUploadRequest`, or
     /// `KeysQueryRequest`, or `KeysClaimRequest`, or
     /// `ToDeviceRequest`, or `SignatureUploadRequest`, or
-    /// `RoomMessageRequest`, or `KeysBackupRequest`. Those requests
+    /// `RoomMessageRequest`. Those requests
     /// need to be sent out to the server and the responses need to be
     /// passed back to the state machine using `mark_request_as_sent`.
     #[napi]
@@ -244,17 +252,16 @@ impl OlmMachine {
     ) -> napi::Result<
         Vec<
             // We could be tempted to use `requests::OutgoingRequests` as its
-            // a type alias for this giant `Either7`. But `napi` won't unfold
+            // a type alias for this giant `Either6`. But `napi` won't unfold
             // it properly into a valid TypeScript definition, so…  let's
             // copy-paste :-(.
-            Either7<
+            Either6<
                 requests::KeysUploadRequest,
                 requests::KeysQueryRequest,
                 requests::KeysClaimRequest,
                 requests::ToDeviceRequest,
                 requests::SignatureUploadRequest,
                 requests::RoomMessageRequest,
-                requests::KeysBackupRequest,
             >,
         >,
     > {
@@ -416,12 +423,11 @@ impl OlmMachine {
         content: String,
     ) -> napi::Result<String> {
         let room_id = room_id.inner.clone();
-        let content: JsonValue = serde_json::from_str(content.as_str()).map_err(into_err)?;
-
+        let content = serde_json::from_str(content.as_str()).map_err(into_err)?;
         serde_json::to_string(
             &self
                 .inner
-                .encrypt_room_event_raw(&room_id, content, event_type.as_ref())
+                .encrypt_room_event_raw(&room_id, event_type.as_ref(), &content)
                 .await
                 .map_err(into_err)?,
         )
@@ -443,7 +449,14 @@ impl OlmMachine {
         let event = Raw::from_json(RawValue::from_string(event).map_err(into_err)?);
         let room_id = room_id.inner.clone();
 
-        let room_event = self.inner.decrypt_room_event(&event, &room_id).await.map_err(into_err)?;
+        let decryption_settings =
+            DecryptionSettings { sender_device_trust_requirement: TrustRequirement::Untrusted };
+
+        let room_event = self
+            .inner
+            .decrypt_room_event(&event, &room_id, &decryption_settings)
+            .await
+            .map_err(into_err)?;
 
         Ok(room_event.into())
     }
@@ -484,8 +497,8 @@ impl OlmMachine {
     /// Sign the given message using our device key and if available
     /// cross-signing master key.
     #[napi(strict)]
-    pub async fn sign(&self, message: String) -> types::Signatures {
-        self.inner.sign(message.as_str()).await.into()
+    pub async fn sign(&self, message: String) -> napi::Result<types::Signatures> {
+        Ok(self.inner.sign(&message).await.map_err(into_err)?.into())
     }
 
     /// Store the backup decryption key in the crypto store.
@@ -613,6 +626,7 @@ impl OlmMachine {
         serde_json::to_string(
             &self
                 .inner
+                .store()
                 .export_room_keys(|session| {
                     session.session_id() == session_id && session.room_id() == &room_id
                 })
